@@ -117,6 +117,9 @@ func (t *Translator) GetSDReqForPods(podList *v1.PodList, metricName string, met
 	if err != nil {
 		return nil, err
 	}
+	if metricName == "istio.io/service/server/p99_response_latencies" {
+		return t.createLatencyRequestProject(joinFilters(filterForSelector, filter), metricKind, t.config.Project), nil
+	}
 	return t.createListTimeseriesRequest(joinFilters(filterForSelector, filter), metricKind), nil
 }
 
@@ -154,6 +157,10 @@ func (t *Translator) GetSDReqForContainersWithNames(resourceNames []string, metr
 	if err != nil {
 		return nil, err
 	}
+	if metricName == "istio.io/service/server/p99_response_latencies" {
+		return t.createLatencyRequestProject(joinFilters(filterForSelector, filter), metricKind, t.config.Project), nil
+	}
+
 	return t.createListTimeseriesRequest(joinFilters(filterForSelector, filter), metricKind), nil
 }
 
@@ -210,6 +217,11 @@ func (t *Translator) GetExternalMetricRequest(metricName string, metricKind stri
 	if err != nil {
 		return nil, err
 	}
+
+	if metricName == "istio.io/service/server/p99_response_latencies" {
+		return t.createLatencyRequestProject(joinFilters(filterForMetric, filterForSelector), metricKind, metricProject), nil
+	}
+
 	return t.createListTimeseriesRequestProject(joinFilters(filterForMetric, filterForSelector), metricKind, metricProject), nil
 }
 
@@ -241,6 +253,13 @@ func (t *Translator) GetMetricKind(metricName string, metricSelector labels.Sele
 			}
 			return "", NewLabelNotAllowedError(fmt.Sprintf("Project selector must use '=' or '==': You used %s", req.Operator()))
 		}
+	}
+	if metricName == "istio.io/service/server/p99_response_latencies" {
+		response, err := t.service.Projects.MetricDescriptors.Get(fmt.Sprintf("projects/%s/metricDescriptors/%s", metricProj, "istio.io/service/server/response_latencies")).Do()
+		if err != nil {
+			return "", NewNoSuchMetricError(metricName, err)
+		}
+		return response.MetricKind, nil
 	}
 	response, err := t.service.Projects.MetricDescriptors.Get(fmt.Sprintf("projects/%s/metricDescriptors/%s", metricProj, metricName)).Do()
 	if err != nil {
@@ -330,6 +349,11 @@ func (t *Translator) filterForCluster() string {
 }
 
 func (t *Translator) filterForMetric(metricName string) string {
+
+	if metricName == "istio.io/service/server/p99_response_latencies" {
+		return fmt.Sprintf("metric.type = %q", "istio.io/service/server/response_latencies")
+	}
+
 	return fmt.Sprintf("metric.type = %q", metricName)
 }
 
@@ -508,6 +532,25 @@ func (t *Translator) createListTimeseriesRequestProject(filter string, metricKin
 		IntervalEndTime(endTime.Format(time.RFC3339)).
 		AggregationPerSeriesAligner(aligner).
 		AggregationAlignmentPeriod(fmt.Sprintf("%vs", int64(alignmentPeriod.Seconds())))
+}
+
+func (t *Translator) createLatencyRequestProject(filter, metricKind, metricProject string) *stackdriver.ProjectsTimeSeriesListCall {
+	project := fmt.Sprintf("projects/%s", metricProject)
+	endTime := t.clock.Now()
+	startTime := endTime.Add(-t.reqWindow)
+	// use "ALIGN_NEXT_OLDER" by default, i.e. for metricKind "GAUGE"
+	// aligner := "ALIGN_NEXT_OLDER"
+	// alignmentPeriod := t.reqWindow
+	// if metricKind == "DELTA" || metricKind == "CUMULATIVE" {
+	// 	aligner = "ALIGN_RATE" // Calculates integral of metric on segment and divide it by segment length.
+	// 	alignmentPeriod = t.alignmentPeriod
+	// }
+	return t.service.Projects.TimeSeries.List(project).Filter(filter).
+		IntervalStartTime(startTime.Format(time.RFC3339)).
+		IntervalEndTime(endTime.Format(time.RFC3339)).
+		AggregationPerSeriesAligner("ALIGN_DELTA").
+		AggregationAlignmentPeriod(fmt.Sprintf("%vs", int64(t.alignmentPeriod.Seconds()))).
+		AggregationCrossSeriesReducer("REDUCE_PERCENTILE_99")
 }
 
 // GetPodItems returns list Pod Objects
